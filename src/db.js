@@ -15,7 +15,9 @@ function createPool() {
     user: decodeURIComponent(databaseUrl.username),
     password: decodeURIComponent(databaseUrl.password),
     database: databaseUrl.pathname.replace(/^\//, ''),
-    ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+    ssl: process.env.DATABASE_SSL === 'true'
+      ? { rejectUnauthorized: false }
+      : undefined,
     waitForConnections: true,
     connectionLimit: Number(process.env.DB_CONNECTION_LIMIT || 10),
     decimalNumbers: true,
