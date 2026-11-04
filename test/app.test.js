@@ -129,6 +129,84 @@ afterEach(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
 });
 
+async function usePool(nextPool) {
+  pool = nextPool;
+  await new Promise((resolve) => server.close(resolve));
+  server = http.createServer(createApp(pool));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+}
+
+test('listing uses trusted identity, ignoring user and role query parameters', async () => {
+  const orders = [
+    { ...createLifecyclePool().order, id: 7, user_id: 'customer-1' },
+    { ...createLifecyclePool().order, id: 8, user_id: 'customer-2' },
+  ];
+  await usePool({
+    async execute(sql, values) {
+      if (sql.includes('FROM order_items')) return [[]];
+      if (sql.includes('WHERE user_id = ?')) return [orders.filter(order => order.user_id === values[0])];
+      assert.equal(sql, 'SELECT * FROM orders ORDER BY id DESC LIMIT 500');
+      return [[...orders].reverse()];
+    },
+  });
+  for (const [role, ids] of [['client', [7]], ['admin', [8, 7]]]) {
+    const response = await fetch(`${baseUrl}/api/pedidos?userId=customer-2&role=admin`, {
+      headers: { 'x-service-token': serviceToken, 'x-user-id': 'customer-1', 'x-user-role': role },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).map(order => order.id), ids);
+  }
+});
+
+test('reads reject incomplete or unknown identity before accessing the database', async () => {
+  for (const path of ['/api/pedidos', '/api/pedidos/7']) {
+    for (const identity of [{}, { 'x-user-role': 'admin' }, { 'x-user-id': 'customer-1', 'x-user-role': 'unknown' }]) {
+      const response = await fetch(`${baseUrl}${path}`, {
+        headers: { 'x-service-token': serviceToken, ...identity },
+      });
+      assert.equal(response.status, 401);
+    }
+  }
+});
+
+test('order detail is visible only to its owner or an identified administrator', async () => {
+  await usePool(createLifecyclePool());
+  for (const [userId, role, status] of [
+    ['customer-1', 'client', 200], ['customer-2', 'client', 404], ['administrator', 'admin', 200],
+  ]) {
+    const response = await fetch(`${baseUrl}/api/pedidos/7`, {
+      headers: { 'x-service-token': serviceToken, 'x-user-id': userId, 'x-user-role': role },
+    });
+    assert.equal(response.status, status);
+  }
+});
+
+test('state retries check permissions before returning an existing order', async () => {
+  const lifecyclePool = createLifecyclePool();
+  await usePool(lifecyclePool);
+  for (const state of ['cancelling', 'cancelled', 'shipped', 'delivered']) {
+    lifecyclePool.order.status = state;
+    for (const [userId, role, status] of [
+      ['customer-2', 'client', 404],
+      ['customer-1', 'client', ['shipped', 'delivered'].includes(state) ? 404 : 200],
+      ['administrator', 'admin', 200],
+      [null, 'admin', 404],
+    ]) {
+      const response = await fetch(`${baseUrl}/api/pedidos/7`, {
+        method: 'PATCH',
+        headers: {
+          'content-type': 'application/json', 'x-service-token': serviceToken,
+          'x-user-role': role, ...(userId ? { 'x-user-id': userId } : {}),
+        },
+        body: JSON.stringify({ estado: state }),
+      });
+      assert.equal(response.status, status, `${state}: ${userId}/${role}`);
+      assert.equal(lifecyclePool.order.status, state);
+    }
+  }
+});
+
 test('orders API cannot be reached with only a customer request', async () => {
   const response = await fetch(`${baseUrl}/api/pedidos`, {
     method: 'POST',
