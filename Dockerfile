@@ -4,4 +4,4 @@ COPY package*.json ./
 RUN npm install --omit=dev
 COPY . .
 EXPOSE 3103
-CMD ["npm", "start"]
+CMD ["sh", "-c", "node src/migrate.js && node src/server.js"]
