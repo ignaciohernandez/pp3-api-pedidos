@@ -208,11 +208,16 @@ function createApp(pool) {
   });
 
   app.get('/api/pedidos/:id', async (req, res) => {
+    const userId = req.get('x-user-id');
+    const role = req.get('x-user-role');
+    if (!userId || !['client', 'admin'].includes(role)) {
+      return res.status(401).json({ message: 'Identidad de usuario requerida' });
+    }
     if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ message: 'Pedido no encontrado' });
     try {
       const [orders] = await pool.execute('SELECT * FROM orders WHERE id = ?', [req.params.id]);
       const order = orders[0];
-      if (!order || (req.get('x-user-role') !== 'admin' && order.user_id !== req.get('x-user-id'))) {
+      if (!order || (role !== 'admin' && order.user_id !== userId)) {
         return res.status(404).json({ message: 'Pedido no encontrado' });
       }
       return res.json(formatOrder(order, await getDetails(pool, order.id)));
@@ -377,16 +382,20 @@ function createApp(pool) {
         return res.status(404).json({ message: 'Pedido no encontrado' });
       }
       if (['cancelling', 'cancelled', 'shipped', 'delivered'].includes(estado)) {
-        if (order.status === estado) {
-          await connection.commit();
-          return res.status(200).json(formatOrder(order, await getDetails(connection, order.id)));
-        }
         const role = req.get('x-user-role');
         const userId = req.get('x-user-id');
         const ownsOrder = userId && order.user_id === userId;
         const authorized = estado === 'shipped' || estado === 'delivered'
-          ? role === 'admin'
-          : role === 'admin' || (role === 'client' && ownsOrder);
+          ? Boolean(userId) && role === 'admin'
+          : Boolean(userId) && (role === 'admin' || (role === 'client' && ownsOrder));
+        if (!authorized) {
+          await connection.rollback();
+          return res.status(404).json({ message: 'Pedido no encontrado' });
+        }
+        if (order.status === estado) {
+          await connection.commit();
+          return res.status(200).json(formatOrder(order, await getDetails(connection, order.id)));
+        }
         const validTransition = estado === 'cancelling'
           ? order.status === 'confirmed'
           : estado === 'cancelled'
@@ -394,7 +403,7 @@ function createApp(pool) {
             : estado === 'shipped'
               ? order.status === 'paid'
               : order.status === 'shipped';
-        if (!authorized || !validTransition) {
+        if (!validTransition) {
           await connection.rollback();
           return res.status(409).json({ message: 'El pedido no admite esta transición' });
         }
