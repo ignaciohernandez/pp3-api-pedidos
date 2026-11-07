@@ -29,3 +29,4 @@ CREATE TABLE IF NOT EXISTS receipts (
   CONSTRAINT receipts_order_fk FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
   CONSTRAINT receipts_payment_fk FOREIGN KEY (payment_id) REFERENCES payments(id) ON DELETE CASCADE
 );
+ALTER TABLE orders ADD COLUMN direccion_entrega VARCHAR(500) NULL AFTER coupon_code;
