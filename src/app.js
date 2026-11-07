@@ -35,7 +35,6 @@ function formatOrder(order, details = []) {
     subtotal: Number(order.subtotal_cents) / 100,
     descuento: Number(order.discount_cents) / 100,
     cuponCodigo: order.coupon_code,
-    direccionEntrega: order.direccion_entrega || null,
     clienteInfo: { nombre: order.user_name, email: order.user_email },
     detalles: details,
     attemptId: order.attempt_id,
@@ -117,9 +116,6 @@ function createApp(pool) {
       .map(([productId, quantity]) => ({ productId, quantity }));
     const couponCode = typeof req.body.couponCode === 'string' ? req.body.couponCode.trim().toUpperCase() : null;
     // Preserve hashes for historical requests that did not include an address.
-const direccionEntrega = typeof req.body.direccionEntrega === 'string'
-  ? req.body.direccionEntrega.trim()
-  : null;
     const requestHash = hashRequest({ items, couponCode,
       ...(direccionEntrega === null ? {} : { direccionEntrega }) });
     const connection = await pool.getConnection();
