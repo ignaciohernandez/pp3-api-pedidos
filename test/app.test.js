@@ -294,3 +294,115 @@ test('simulated payments are retryable and produce one owner-protected receipt',
   });
   assert.equal(otherUserReceipt.status, 404);
 });
+
+function createOrderPool() {
+  const orders = [];
+  const details = [];
+  const execute = async (sql, values = []) => {
+    if (sql.includes('INSERT INTO orders')) {
+      const [user_id, user_email, user_name, attempt_id, request_hash, coupon_code, direccion_entrega] = values;
+      assert.match(sql, /coupon_code, direccion_entrega/);
+      if (orders.some(order => order.user_id === user_id && order.attempt_id === attempt_id)) {
+        throw Object.assign(new Error('Duplicate attempt'), { code: 'ER_DUP_ENTRY' });
+      }
+      const order = { ...createLifecyclePool().order, id: orders.length + 1,
+        user_id, user_email, user_name, attempt_id, request_hash, coupon_code, direccion_entrega, status: 'pending' };
+      orders.push(order);
+      return [{ insertId: order.id }];
+    }
+    if (sql.includes('INSERT INTO order_items')) {
+      details.push({ order_id: values[0], product_id: values[1], quantity: values[2] });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.includes('FROM order_items')) return [details.filter(item => item.order_id === values[0])];
+    if (sql.includes('WHERE user_id = ? AND attempt_id = ?')) {
+      return [orders.filter(order => order.user_id === values[0] && order.attempt_id === values[1])];
+    }
+    if (sql.includes('WHERE id = ?')) return [orders.filter(order => String(order.id) === String(values[0]))];
+    if (sql.includes('WHERE user_id = ?')) return [orders.filter(order => order.user_id === values[0])];
+    throw new Error(`Unexpected SQL: ${sql}`);
+  };
+  return { orders, details, execute, async getConnection() {
+    return { execute, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
+  } };
+}
+
+const orderHeaders = {
+  'content-type': 'application/json', 'x-service-token': serviceToken,
+  'x-user-id': 'customer-1', 'x-user-role': 'client', 'x-user-email': 'customer@example.com',
+  'idempotency-key': 'address-attempt',
+};
+const orderBody = { items: [{ productId: 31, quantity: 2 }], couponCode: ' ahorro ' };
+const postOrder = body => fetch(`${baseUrl}/api/pedidos`, {
+  method: 'POST', headers: orderHeaders, body: JSON.stringify(body),
+});
+
+test('address is trimmed, persisted and returned by creation, list and detail', async () => {
+  const database = createOrderPool();
+  await usePool(database);
+  const response = await postOrder({ ...orderBody, direccionEntrega: '  Avenida Siempre Viva 742  ' });
+  assert.equal(response.status, 201);
+  const created = await response.json();
+  assert.equal(created.direccionEntrega, 'Avenida Siempre Viva 742');
+  assert.equal(database.orders[0].direccion_entrega, created.direccionEntrega);
+  for (const path of ['/api/pedidos', `/api/pedidos/${created.id}`]) {
+    const result = await fetch(`${baseUrl}${path}`, { headers: orderHeaders });
+    assert.equal(result.status, 200);
+    const body = await result.json();
+    assert.equal((Array.isArray(body) ? body[0] : body).direccionEntrega, created.direccionEntrega);
+  }
+});
+
+test('missing address stores null and historical orders return null', async () => {
+  const database = createOrderPool();
+  await usePool(database);
+  const response = await postOrder(orderBody);
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).direccionEntrega, null);
+  assert.equal(database.orders[0].direccion_entrega, null);
+  delete database.orders[0].direccion_entrega;
+  for (const path of ['/api/pedidos', '/api/pedidos/1']) {
+    const response = await fetch(`${baseUrl}${path}`, { headers: orderHeaders });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal((Array.isArray(body) ? body[0] : body).direccionEntrega, null);
+  }
+  const { createHash } = require('node:crypto');
+  assert.equal(database.orders[0].request_hash, createHash('sha256').update(JSON.stringify({
+    items: orderBody.items, couponCode: 'AHORRO',
+  })).digest('hex'));
+  assert.equal((await postOrder(orderBody)).status, 200);
+  assert.equal((await postOrder({ ...orderBody, direccionEntrega: 'Nueva 123' })).status, 409);
+  assert.equal(database.orders.length, 1);
+});
+
+test('invalid addresses fail before accessing the database', async () => {
+  for (const direccionEntrega of [null, false, 123, {}, [], '', ' \t\n ', 'a'.repeat(501)]) {
+    assert.equal((await postOrder({ ...orderBody, direccionEntrega })).status, 400);
+  }
+});
+
+test('accepts 500 characters after trimming', async () => {
+  const database = createOrderPool();
+  await usePool(database);
+  const response = await postOrder({ ...orderBody, direccionEntrega: `  ${'a'.repeat(500)}  ` });
+  assert.equal(response.status, 201);
+  assert.equal(database.orders[0].direccion_entrega.length, 500);
+});
+
+test('idempotency includes normalized address, items and coupon without duplicates', async () => {
+  const database = createOrderPool();
+  await usePool(database);
+  const body = { ...orderBody, direccionEntrega: 'Calle 123' };
+  assert.equal((await postOrder(body)).status, 201);
+  const repeated = await postOrder({ ...body, couponCode: 'AHORRO', direccionEntrega: ' Calle 123 ' });
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).id, database.orders[0].id);
+  for (const changed of [
+    { ...body, direccionEntrega: 'Otra 456' }, orderBody,
+    { ...body, couponCode: 'OTRO' },
+    { ...body, items: [{ productId: 31, quantity: 3 }] },
+  ]) assert.equal((await postOrder(changed)).status, 409);
+  assert.equal(database.orders.length, 1);
+  assert.equal(database.details.length, 1);
+});
