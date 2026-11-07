@@ -314,6 +314,19 @@ function createOrderPool() {
       details.push({ order_id: values[0], product_id: values[1], quantity: values[2] });
       return [{ affectedRows: 1 }];
     }
+    if (sql.includes('UPDATE order_items SET product_name')) {
+      Object.assign(details.find(item => item.order_id === values[3] && item.product_id === values[4]), {
+        product_name: values[0], unit_price_cents: values[1], subtotal_cents: values[2],
+      });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.includes("UPDATE orders SET status = 'confirmed'")) {
+      Object.assign(orders.find(order => order.id === values[4]), {
+        status: 'confirmed', subtotal_cents: values[0], discount_cents: values[1],
+        total_cents: values[2], coupon_code: values[3],
+      });
+      return [{ affectedRows: 1 }];
+    }
     if (sql.includes('FROM order_items')) return [details.filter(item => item.order_id === values[0])];
     if (sql.includes('WHERE user_id = ? AND attempt_id = ?')) {
       return [orders.filter(order => order.user_id === values[0] && order.attempt_id === values[1])];
@@ -405,4 +418,42 @@ test('idempotency includes normalized address, items and coupon without duplicat
   ]) assert.equal((await postOrder(changed)).status, 409);
   assert.equal(database.orders.length, 1);
   assert.equal(database.details.length, 1);
+});
+
+
+test('coupon and address survive confirmation, reads and retries', async () => {
+  const database = createOrderPool();
+  await usePool(database);
+  const body = { ...orderBody, direccionEntrega: 'Calle 123' };
+  const created = await postOrder(body);
+  assert.equal(created.status, 201);
+  assert.equal((await created.json()).cuponCodigo, 'AHORRO');
+  const confirmation = { estado: 'confirmed', inventory: {
+    items: [{ productId: 31, quantity: 2, productName: 'Producto', unitPriceCents: 6000, subtotalCents: 12000 }],
+    subtotalCents: 12000, discountCents: 2000, totalCents: 10000, couponCode: 'AHORRO',
+  } };
+  const initialHash = database.orders[0].request_hash;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${baseUrl}/api/pedidos/1`, {
+      method: 'PATCH', headers: orderHeaders, body: JSON.stringify(confirmation),
+    });
+    assert.equal(response.status, 200);
+    const order = await response.json();
+    assert.equal(order.cuponCodigo, 'AHORRO');
+    assert.equal(order.direccionEntrega, 'Calle 123');
+  }
+  for (const path of ['/api/pedidos', '/api/pedidos/1']) {
+    const response = await fetch(`${baseUrl}${path}`, { headers: orderHeaders });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    const order = Array.isArray(result) ? result[0] : result;
+    assert.equal(order.cuponCodigo, 'AHORRO');
+    assert.equal(order.direccionEntrega, 'Calle 123');
+  }
+  const retry = await postOrder(body);
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).cuponCodigo, 'AHORRO');
+  assert.equal((await postOrder({ ...body, couponCode: 'OTRO' })).status, 409);
+  assert.equal(database.orders[0].request_hash, initialHash);
+  assert.equal(database.orders.length, 1);
 });

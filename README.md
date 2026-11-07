@@ -97,5 +97,11 @@ servicio con su configuración MySQL habitual. La migración
 sin modificar pedidos existentes. Comprueba `information_schema.columns` antes
 de agregarla, porque el ejecutor aplica todos los SQL en orden en cada ejecución.
 Puede reejecutarse; requiere permisos de lectura de metadatos y `ALTER` sobre
-`orders`. El arranque Docker (`npm start`) no ejecuta migraciones automáticamente.
-Aplicar primero la migración y luego la aplicación. No se ejecutó contra producción.
+`orders`. Docker ejecuta `node src/migrate.js && node src/server.js`: si una
+migración falla, el servidor no inicia. `npm start` por separado solo inicia
+la API; en ese caso ejecutar primero `npm run migrate`.
+
+La columna de dirección se administra exclusivamente en `003`; `002` conserva
+su definición original sin un ADD COLUMN incondicional. Esto permite repetir
+el arranque tanto sobre bases anteriores como sobre bases que ya tienen la columna.
+No se ejecutaron migraciones contra la base remota durante esta corrección.
