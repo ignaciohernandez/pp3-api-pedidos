@@ -27,6 +27,7 @@ function formatOrder(order, details = []) {
     id: Number(order.id),
     pedidoId: Number(order.id),
     userId: order.user_id,
+    direccionEntrega: order.direccion_entrega ?? null,
     estado: order.status,
     status: order.status,
     fecha: order.created_at,
@@ -95,6 +96,13 @@ function createApp(pool) {
       return res.status(400).json({ message: 'Identidad, clave idempotente y artículos válidos son obligatorios' });
     }
 
+    const rawAddress = req.body.direccionEntrega;
+    if (rawAddress !== undefined && (typeof rawAddress !== 'string' || !rawAddress.trim()
+      || [...rawAddress.trim()].length > 500)) {
+      return res.status(400).json({ message: 'direccionEntrega debe ser un texto no vacío de hasta 500 caracteres' });
+    }
+    const direccionEntrega = rawAddress === undefined ? null : rawAddress.trim();
+
     const quantities = new Map();
     for (const item of rawItems) {
       const productId = Number(item.productId);
@@ -107,14 +115,16 @@ function createApp(pool) {
     const items = [...quantities.entries()].sort(([a], [b]) => a - b)
       .map(([productId, quantity]) => ({ productId, quantity }));
     const couponCode = typeof req.body.couponCode === 'string' ? req.body.couponCode.trim().toUpperCase() : null;
-    const requestHash = hashRequest({ items, couponCode });
+    // Preserve hashes for historical requests that did not include an address.
+    const requestHash = hashRequest({ items, couponCode,
+      ...(direccionEntrega === null ? {} : { direccionEntrega }) });
     const connection = await pool.getConnection();
     try {
       await connection.beginTransaction();
       const [result] = await connection.execute(
-        `INSERT INTO orders (user_id, user_email, user_name, attempt_id, request_hash, status, coupon_code)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-        [userId, userEmail, userName, attemptId, requestHash, couponCode],
+        `INSERT INTO orders (user_id, user_email, user_name, attempt_id, request_hash, status, coupon_code, direccion_entrega)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        [userId, userEmail, userName, attemptId, requestHash, couponCode, direccionEntrega],
       );
       const orderId = result.insertId;
       for (const item of items) {
