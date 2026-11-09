@@ -11,6 +11,8 @@ const pool = createPool();
 const app = createApp(pool);
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Orders service listening on port ${port}`);
+  // Pre-calentar la conexión a la BD para que el primer request sea rápido
+  pool.query('SELECT 1').catch((err) => console.error('DB warmup failed:', err.message));
 });
 
 async function shutdown() {
